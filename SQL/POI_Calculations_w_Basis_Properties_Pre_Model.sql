@@ -59,7 +59,7 @@ nearest_amenities AS (
 ),
 amenities_pivoted AS (
     SELECT
-        propertyid,
+        TRY_CAST(propertyid AS NUMBER) AS propertyid,
         MAX(CASE WHEN amenity = 'Retail' THEN nearest_dist_m END) AS retail_dist_m,
         MAX(CASE WHEN amenity = 'Retail' THEN nearest_poi_id END) AS retail_poi_id,
         MAX(CASE WHEN amenity = 'airport' THEN nearest_dist_m END) AS airport_dist_m,
@@ -189,18 +189,19 @@ amenities_pivoted AS (
         MAX(CASE WHEN amenity = 'wetland' THEN nearest_dist_m END) AS wetland_dist_m,
         MAX(CASE WHEN amenity = 'wetland' THEN nearest_poi_id END) AS wetland_poi_id
     FROM nearest_amenities
-    GROUP BY propertyid
+    GROUP BY TRY_CAST(propertyid AS NUMBER)
 ),
 address_mapping AS (
     SELECT
         f.value::STRING AS MLS_ID,
-        a.value::STRING AS ASSESSOR_ID
+        TRY_CAST(a.value::STRING AS NUMBER) AS ASSESSOR_ID
     FROM ROC_ANALYTICS.ANALYTICS.ADDRESSES_MASTER,
     LATERAL FLATTEN(input => MLS_IDS) f,
     LATERAL FLATTEN(input => ASSESSOR_IDS) a
+    WHERE a.value IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY f.value::STRING ORDER BY a.value::STRING) = 1
 )
--- Final join with pivoted amenities (134 columns total)
+-- Final join with proper NUMBER casting (134 amenity columns total)
 SELECT
     b.*,
     map.ASSESSOR_ID,
