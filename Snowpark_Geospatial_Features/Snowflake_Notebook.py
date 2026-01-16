@@ -114,16 +114,53 @@ class FeatureScreener:
 
         print(f"  Creating features for {len(amenity_list)} amenities...")
 
+        # **FILTER OUTLIERS - REMOVE TOP/BOTTOM 1% OF PRICES**
         self.session.sql(f"""
             CREATE OR REPLACE TABLE {self.schema}.FEATURES_ENGINEERED AS
+            WITH price_bounds AS (
+                SELECT 
+                    PERCENTILE_CONT(0.01) WITHIN GROUP (ORDER BY {target_col}) as lower_bound,
+                    PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY {target_col}) as upper_bound
+                FROM (
+                    SELECT DISTINCT CC_PROPERTY_ID, {target_col} 
+                    FROM {source_table} 
+                    WHERE CC_PROPERTY_ID IS NOT NULL 
+                      AND {target_col} IS NOT NULL
+                      AND {target_col} > 0
+                )
+            )
             SELECT p.CC_PROPERTY_ID, p.{target_col}, {features_sql}
-            FROM (SELECT DISTINCT CC_PROPERTY_ID, {target_col} FROM {source_table} WHERE CC_PROPERTY_ID IS NOT NULL) p
+            FROM (
+                SELECT DISTINCT CC_PROPERTY_ID, {target_col} 
+                FROM {source_table} 
+                WHERE CC_PROPERTY_ID IS NOT NULL
+                  AND {target_col} IS NOT NULL
+                  AND {target_col} > 0
+                  AND {target_col} BETWEEN (SELECT lower_bound FROM price_bounds) 
+                                       AND (SELECT upper_bound FROM price_bounds)
+            ) p
             LEFT JOIN {source_table} g ON p.CC_PROPERTY_ID = g.CC_PROPERTY_ID
             GROUP BY p.CC_PROPERTY_ID, p.{target_col}
         """).collect()
 
         df = self.session.table(f"{self.schema}.FEATURES_ENGINEERED")
         feature_cols = [c for c in df.columns if c not in ['CC_PROPERTY_ID', target_col]]
+
+        # **PRINT PRICE DIAGNOSTICS**
+        price_stats = df.select(
+            count(col(target_col)).alias('count'),
+            avg(col(target_col)).alias('avg'),
+            stddev(col(target_col)).alias('stddev'),
+            min_(col(target_col)).alias('min'),
+            max_(col(target_col)).alias('max')
+        ).collect()[0]
+
+        print(f"\n  Price Statistics (after outlier removal):")
+        print(f"    Properties: {price_stats['COUNT']}")
+        print(f"    Average: ${price_stats['AVG']:,.0f}")
+        print(f"    Std Dev: ${price_stats['STDDEV']:,.0f}")
+        print(f"    Min: ${price_stats['MIN']:,.0f}")
+        print(f"    Max: ${price_stats['MAX']:,.0f}")
 
         self.log_stage("Feature Engineering", len(amenity_list), len(feature_cols))
 
@@ -209,7 +246,7 @@ class FeatureScreener:
         return df.select('CC_PROPERTY_ID', target_col, *survivors), survivors
 
     def screen_by_correlation(self, df, feature_cols, target_col='CURRENTSALESPRICE',
-                              min_target_corr=0.05, max_feature_corr=0.85):
+                              min_target_corr=0.02, max_feature_corr=0.85):
         """Correlation screening"""
         print("\n=== STAGE 4: CORRELATION SCREENING ===")
 
@@ -218,14 +255,35 @@ class FeatureScreener:
         corr_exprs = [corr(col(f), col(target_col)).alias(f) for f in feature_cols]
         target_corrs = df.select(corr_exprs).collect()[0].as_dict()
 
+        # **DIAGNOSTIC OUTPUT**
+        print(f"\n  DIAGNOSTIC: Correlation Distribution:")
+        corr_values = [abs(v) for v in target_corrs.values() if v is not None]
+        if corr_values:
+            print(f"    Max correlation: {max(corr_values):.4f}")
+            print(f"    Min correlation: {min(corr_values):.4f}")
+            print(f"    Avg correlation: {sum(corr_values) / len(corr_values):.4f}")
+            print(f"    Features above {min_target_corr}: {sum(1 for c in corr_values if c >= min_target_corr)}")
+        else:
+            print(f"    WARNING: All correlations are NULL!")
+
         survivors_data = []
         for f in feature_cols:
             corr_val = target_corrs.get(f.upper())
             if corr_val is not None and abs(corr_val) >= min_target_corr:
                 survivors_data.append({'feature': f, 'corr': corr_val, 'abs_corr': abs(corr_val)})
 
-        survivors_df = pd.DataFrame(survivors_data).sort_values('abs_corr', ascending=False)
-        survivors = survivors_df['feature'].tolist()
+        # **HANDLE EMPTY SURVIVORS**
+        if not survivors_data:
+            print(f"  WARNING: No features met min_target_corr={min_target_corr}")
+            print(f"  Keeping all {len(feature_cols)} features")
+            survivors_df = pd.DataFrame([
+                {'feature': f, 'corr': target_corrs.get(f.upper(), 0), 'abs_corr': abs(target_corrs.get(f.upper(), 0))}
+                for f in feature_cols
+            ]).sort_values('abs_corr', ascending=False)
+            survivors = survivors_df['feature'].tolist()
+        else:
+            survivors_df = pd.DataFrame(survivors_data).sort_values('abs_corr', ascending=False)
+            survivors = survivors_df['feature'].tolist()
 
         print(f"  After target filter: {len(feature_cols)} → {len(survivors)}")
 
@@ -277,11 +335,11 @@ class FeatureScreener:
         print("\n=== STAGE 5: COMPOSITE CREATION ===")
 
         groups = {
-            'ESSENTIAL': ['HOSPITAL', 'CLINIC', 'PHARMACY', 'FIRE_STATION', 'POLICE'],
+            'ESSENTIAL': ['HOSPITAL', 'CLINIC', 'PHARMACY', 'FIRE_STATION', 'POLICE', 'DENTIST'],
             'EDUCATION': ['SCHOOL', 'KINDERGARTEN', 'COLLEGE', 'UNIVERSITY', 'LIBRARY'],
-            'CULTURAL': ['MUSEUM', 'THEATRE', 'CINEMA', 'GALLERY'],
-            'DAILY': ['RESTAURANT', 'CAFE', 'GROCERY', 'SUPERMARKET', 'BANK'],
-            'RECREATION': ['PARK', 'PLAYGROUND', 'GYM', 'SPORTS']
+            'CULTURAL': ['MUSEUM', 'THEATRE', 'CINEMA', 'GALLERY', 'ARTS'],
+            'DAILY': ['RESTAURANT', 'CAFE', 'GROCERY', 'SUPERMARKET', 'BANK', 'POST', 'FUEL'],
+            'RECREATION': ['PARK', 'PLAYGROUND', 'GYM', 'SPORTS', 'POOL']
         }
 
         feature_scores = dict(zip(corr_df['feature'], corr_df['abs_corr']))
@@ -299,7 +357,7 @@ class FeatureScreener:
 
             comp_name = f"{group_name}_SCORE"
 
-            # Build sum expression properly (fixed)
+            # Build sum expression properly
             comp_expr = coalesce(col(has_features[0]), lit(0))
             for feat in has_features[1:]:
                 comp_expr = comp_expr + coalesce(col(feat), lit(0))
@@ -377,6 +435,102 @@ class FeatureScreener:
 
         return df.select('CC_PROPERTY_ID', target_col, *top_features), top_features, importance_df
 
+    def save_reports(self, features, importance_df, price_dist_df):
+        """Save comprehensive reports to tables"""
+        from datetime import datetime
+
+        print("\n" + "=" * 70)
+        print("SAVING DETAILED REPORTS")
+        print("=" * 70)
+
+        # Report 1: Amenities
+        print(f"  ✓ {self.schema}.SCREENED_AMENITIES (already saved)")
+
+        # Report 2: Pipeline Summary
+        summary_data = []
+        for stage in self.log['stages']:
+            summary_data.append({
+                'stage': stage['stage'],
+                'input_count': stage['input'],
+                'output_count': stage['output'],
+                'dropped_count': stage['dropped'],
+                'retention_pct': round(stage['output'] / stage['input'] * 100, 1) if stage['input'] > 0 else 0
+            })
+
+        summary_df = self.session.create_dataframe(summary_data)
+        summary_df.write.mode("overwrite").save_as_table(
+            f"{self.schema}.REPORT_PIPELINE_SUMMARY"
+        )
+        print(f"  ✓ {self.schema}.REPORT_PIPELINE_SUMMARY")
+
+        # Report 2B: Detailed Output Log with Timestamps
+        log_data = []
+        for stage in self.log['stages']:
+            log_data.append({
+                'run_timestamp': datetime.now(),
+                'stage_name': stage['stage'],
+                'log_message': f"{stage['stage']}: {stage['input']} → {stage['output']} (-{stage['dropped']})",
+                'input_count': stage['input'],
+                'output_count': stage['output'],
+                'dropped_count': stage['dropped'],
+                'retention_pct': round(stage['output'] / stage['input'] * 100, 1) if stage['input'] > 0 else 0
+            })
+
+        log_df = self.session.create_dataframe(log_data)
+        log_df.write.mode("append").save_as_table(
+            f"{self.schema}.PIPELINE_OUTPUT_LOG"
+        )
+        print(f"  ✓ {self.schema}.PIPELINE_OUTPUT_LOG")
+
+        # Report 3: Final Features with Importance
+        if not importance_df.empty:
+            features_data = []
+            for i, feat in enumerate(features, 1):
+                imp_vals = importance_df[importance_df['feature'] == feat]['importance'].values
+                features_data.append({
+                    'rank': i,
+                    'feature_name': feat,
+                    'importance': float(imp_vals[0]) if len(imp_vals) > 0 else 0.0,
+                    'feature_type': 'Distance' if feat.startswith('DIST_')
+                    else 'Binary' if feat.startswith('HAS_')
+                    else 'Count' if feat.startswith('COUNT_')
+                    else 'Composite'
+                })
+
+            features_df = self.session.create_dataframe(features_data)
+            features_df.write.mode("overwrite").save_as_table(
+                f"{self.schema}.REPORT_FINAL_FEATURES"
+            )
+            print(f"  ✓ {self.schema}.REPORT_FINAL_FEATURES")
+
+        # Report 4: Price-Distance Analysis
+        if not price_dist_df.empty:
+            dist_data = []
+            for _, row in price_dist_df.iterrows():
+                dist_data.append({
+                    'amenity': row['amenity'],
+                    'correlation': float(row['correlation']),
+                    'abs_correlation': abs(float(row['correlation'])),
+                    'direction': row['direction'],
+                    'strength': row['strength']
+                })
+
+            dist_df = self.session.create_dataframe(dist_data)
+            dist_df.write.mode("overwrite").save_as_table(
+                f"{self.schema}.REPORT_PRICE_DISTANCE"
+            )
+            print(f"  ✓ {self.schema}.REPORT_PRICE_DISTANCE")
+
+        print("\n" + "=" * 70)
+        print("ALL REPORTS SAVED")
+        print("=" * 70)
+        print("\nQuery these tables to view results:")
+        print(f"  • SELECT * FROM {self.schema}.REPORT_PIPELINE_SUMMARY;")
+        print(f"  • SELECT * FROM {self.schema}.PIPELINE_OUTPUT_LOG ORDER BY run_timestamp DESC;")
+        print(f"  • SELECT * FROM {self.schema}.REPORT_FINAL_FEATURES ORDER BY rank;")
+        print(f"  • SELECT * FROM {self.schema}.REPORT_PRICE_DISTANCE ORDER BY abs_correlation DESC;")
+        print(f"  • SELECT * FROM {self.schema}.SCREENED_AMENITIES ORDER BY coverage_rate DESC;")
+
     def run_full_pipeline(self, source_table,
                           target_col='CURRENTSALESPRICE',
                           distance_col='NEAREST_DIST_METERS',
@@ -403,8 +557,8 @@ class FeatureScreener:
         # Stage 3: Quality filter
         df, features = self.filter_by_quality(df, features, target_col)
 
-        # Stage 4: Correlation screening
-        df, features, corr_df = self.screen_by_correlation(df, features, target_col)
+        # Stage 4: Correlation screening (lowered min_target_corr to 0.02)
+        df, features, corr_df = self.screen_by_correlation(df, features, target_col, min_target_corr=0.02)
 
         # Stage 5: Composites
         df, features = self.create_composites(df, features, corr_df, target_col)
@@ -419,6 +573,9 @@ class FeatureScreener:
         print(f"\n  Saving final dataset...")
         df.write.mode("overwrite").save_as_table(f"{self.schema}.FEATURES_FINAL")
 
+        # Save all reports
+        self.save_reports(features, importance_df, price_dist_analysis)
+
         print("\n" + "=" * 70)
         print("PIPELINE COMPLETE")
         print("=" * 70)
@@ -431,10 +588,10 @@ class FeatureScreener:
             else:
                 print(f"  {i:2d}. {feat}")
 
-        print(f"\nOutput Tables Created:")
-        print(f"  - {self.schema}.SCREENED_AMENITIES")
-        print(f"  - {self.schema}.FEATURES_ENGINEERED")
-        print(f"  - {self.schema}.FEATURES_FINAL ← Use this for modeling")
+        print(f"\nOutput Tables:")
+        print(f"  • {self.schema}.FEATURES_FINAL ← Use this for GP-DAG modeling")
+        print(f"  • {self.schema}.FEATURES_ENGINEERED (all features before selection)")
+        print(f"  • {self.schema}.SCREENED_AMENITIES (amenity statistics)")
 
         print(f"\nPipeline Summary:")
         for stage in self.log['stages']:
@@ -450,8 +607,12 @@ class FeatureScreener:
 def main(session: snowpark.Session):
     """Main handler for Python Worksheet"""
 
-    print("Starting Feature Screening Pipeline...")
+    print("=" * 70)
+    print("STARTING GEOSPATIAL FEATURE SCREENING")
+    print("=" * 70)
     print(f"Session: {session.get_current_database()}.{session.get_current_schema()}")
+    print(f"Warehouse: {session.get_current_warehouse()}")
+    print("=" * 70)
 
     # Initialize screener
     screener = FeatureScreener(session, schema="SCRATCH.OSM_DATA")
@@ -465,5 +626,11 @@ def main(session: snowpark.Session):
     )
 
     # Return preview DataFrame (required for Python Worksheets)
-    print("\n✓ Returning preview of final dataset (first 100 rows)...")
+    print("\n" + "=" * 70)
+    print("RETURNING PREVIEW")
+    print("=" * 70)
+    print("Returning first 100 rows of final dataset...")
+    print("For full dataset, query: SCRATCH.OSM_DATA.FEATURES_FINAL")
+    print("=" * 70)
+
     return df_final.limit(100)
