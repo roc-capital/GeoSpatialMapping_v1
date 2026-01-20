@@ -464,6 +464,12 @@ class FeatureScreener:
         print(f"  ✓ {self.schema}.REPORT_PIPELINE_SUMMARY")
 
         # Report 2B: Detailed Output Log with Timestamps
+        # **FIX: Drop existing table first to avoid schema mismatch**
+        try:
+            self.session.sql(f"DROP TABLE IF EXISTS {self.schema}.PIPELINE_OUTPUT_LOG").collect()
+        except:
+            pass
+
         log_data = []
         for stage in self.log['stages']:
             log_data.append({
@@ -477,7 +483,7 @@ class FeatureScreener:
             })
 
         log_df = self.session.create_dataframe(log_data)
-        log_df.write.mode("append").save_as_table(
+        log_df.write.mode("overwrite").save_as_table(  # **CHANGED TO OVERWRITE**
             f"{self.schema}.PIPELINE_OUTPUT_LOG"
         )
         print(f"  ✓ {self.schema}.PIPELINE_OUTPUT_LOG")

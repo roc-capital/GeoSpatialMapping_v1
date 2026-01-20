@@ -9,27 +9,29 @@ WITH address_mapping AS (
     WHERE a.value IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY f.value::STRING ORDER BY a.value::STRING) = 1
 ),
-sampled_assessor AS (
-    SELECT
-        propertyid,
-        situsstate,
-        TO_GEOGRAPHY(ST_MAKEPOINT(situslongitude, situslatitude)) AS house_point
-    FROM ROC_PUBLIC_RECORD_DATA.DATATREE.ASSESSOR
-    WHERE situsstate IN ('ny', 'oh', 'nc')
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY situsstate ORDER BY RANDOM()) <= 6000
-),
-sampled_basis_properties AS (
+basis_with_assessor AS (
     SELECT
         b.CC_PROPERTY_ID,
         map.ASSESSOR_ID,
-        sa.situsstate,
-        sa.house_point
+        a.situsstate,
+        TO_GEOGRAPHY(ST_MAKEPOINT(a.situslongitude, a.situslatitude)) AS house_point
     FROM SCRATCH.BASIS.STG_MLS b
     INNER JOIN address_mapping map
         ON b.CC_PROPERTY_ID = map.MLS_ID
-    INNER JOIN sampled_assessor sa
-        ON map.ASSESSOR_ID = sa.propertyid
+    INNER JOIN ROC_PUBLIC_RECORD_DATA.DATATREE.ASSESSOR a
+        ON map.ASSESSOR_ID = a.propertyid
+    WHERE a.situsstate IN ('ny', 'oh', 'nc')
 ),
+sampled_basis_properties AS (
+    SELECT
+        CC_PROPERTY_ID,
+        ASSESSOR_ID,
+        situsstate,
+        house_point
+    FROM basis_with_assessor
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY situsstate ORDER BY RANDOM()) <= 9000
+),
+-- rest of your query stays the same
 amenities AS (
     SELECT AMENITY, TO_GEOGRAPHY(ST_MAKEPOINT(LON, LAT)) AS poi_point
     FROM SCRATCH.OSM_DATA.NEW_YORK_AMENITIES_V3

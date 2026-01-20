@@ -1,0 +1,44 @@
+1. Main Source Table (for pipeline)
+SCRATCH.OSM_DATA.GSF_SCREENING
+Columns needed:
+
+CC_PROPERTY_ID - Unique property identifier
+PROPERTYID - Assessor property ID
+AMENITY - Type of amenity (e.g., "hospital", "park", "school")
+NEAREST_DIST_METERS - Distance to nearest amenity in meters
+CURRENTSALESPRICE - Target variable (property price)
+CURRENTSALECONTRACTDATE - Sale date
+SITUSSTATE - State (if you want state-level analysis)
+
+2. Sample Data Table (for creating GSF_SCREENING)
+SCRATCH.OSM_DATA.AMENITY_COVERAGE_SAMPLE_DATA
+Columns needed:
+
+CC_PROPERTY_ID
+ASSESSOR_ID
+SITUSSTATE
+AMENITY
+
+3. Assessor Data Table
+ROC_PUBLIC_RECORD_DATA.DATATREE.ASSESSOR
+Columns needed:
+
+PROPERTYID
+CURRENTSALESPRICE
+CURRENTSALECONTRACTDATE
+MOSTRECENTSALEDATE
+MOSTRECENTSALEPRICE
+SITUSLONGITUDE
+SITUSLATITUDE
+SITUSSTATE
+
+4. Amenity Tables (OpenStreetMap data)
+SCRATCH.OSM_DATA.NEW_YORK_AMENITIES_V3
+SCRATCH.OSM_DATA.OHIO_AMENITIES_V3
+SCRATCH.OSM_DATA.NORTH_CAROLINA_AMENITIES_V3
+Columns needed for each:
+
+STATE - State abbreviation
+LAT - Latitude
+LON - Longitude
+AMENITY - Type of amenity
