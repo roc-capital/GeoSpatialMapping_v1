@@ -1,0 +1,17 @@
+# On Instance 2 - Export to CSV
+sudo -u postgres psql -d poi_data -c "\COPY (
+  SELECT
+    place_id,
+    name,
+    latitude,
+    longitude,
+    amenity_type as amenity,
+    state,
+    business_status,
+    created_at,
+    updated_at
+  FROM facilities
+) TO '/tmp/poi_export.csv' CSV HEADER;"
+
+# Download to your Mac
+scp -i /Users/jenny.lin/Downloads/poi-scraper-key.pem ubuntu@100.52.243.216:/tmp/poi_export.csv ~/Downloads/
